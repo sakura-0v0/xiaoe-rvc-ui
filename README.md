@@ -12,9 +12,10 @@ RVC 实时变声的新版图形界面，基于自研 PySide6 框架 `xiaoe_ui` �
 
 本文件夹需放置在 **RVC 根目录下**（与 `realtime_gui.py`、`runtime`、`configs` 同级）。
 
-1. 把整个 `xiaoe_rvc_ui` 文件夹复制到 RVC 根目录
-2. 双击 `run.bat` 启动即可。启动脚本会自动检测依赖，**首次运行自动联网安装**（PySide6、xiaoe_ui 等），之后直接启动，无需手动装依赖。
-3. 想查看运行日志可双击 `run_with_console.bat`（同样会自动装依赖）；也可单独双击 `install.bat` 手动安装依赖。
+1. **下载**：建议前往 [Releases](https://github.com/sakura-0v0/xiaoe-rvc-ui/releases) 下载（解压即用）。若直接下载项目 ZIP，解压后的文件夹名会带 `-main` 等后缀，请**先重命名文件夹为 `xiaoe_rvc_ui`**。
+2. 把 `xiaoe_rvc_ui` 文件夹复制到 RVC 根目录（文件夹名必须为 `xiaoe_rvc_ui`）。
+3. 双击 `run.bat` 启动即可。启动脚本会自动检测依赖，**首次运行自动联网安装**（PySide6、xiaoe_ui 等），之后直接启动，无需手动装依赖。
+4. 想查看运行日志可双击 `run_with_console.bat`（同样会自动装依赖）；也可单独双击 `install.bat` 手动安装依赖。
 
 ## 使用
 
