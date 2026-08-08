@@ -35,12 +35,12 @@ def check_deps():
         return False
 
 
-def _pip_visible(args):
-    """在新控制台窗口里跑 pip，让安装进度可见；返回退出码。"""
+def _pip_hidden(args):
+    """完全隐藏窗口跑 pip（无黑框）；返回退出码。"""
     try:
         proc = subprocess.Popen(
             [PYEXE, "-m", "pip", "--disable-pip-version-check"] + args,
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         proc.wait()
         return proc.returncode
@@ -49,15 +49,45 @@ def _pip_visible(args):
 
 
 def install_deps():
+    """弹一个友好的进度窗，后台隐藏 pip 安装；成功返回 True（无黑框）。"""
     if not os.path.exists(PYEXE):
         msgbox(f"未找到 RVC 运行环境：\n{PYEXE}\n请确认已解压原版 RVC 且目录结构正确。",
                "启动失败", _MB_OK | _MB_ICONERROR)
         return False
-    if _pip_visible(["install", "-r", REQ]) != 0:
-        return False
-    if os.path.exists(WHL):
-        return _pip_visible(["install", WHL]) == 0
-    return True
+    import threading
+    import tkinter as tk
+    from tkinter import ttk
+
+    result = {"ok": True}
+
+    def run():
+        steps = [["install", "-r", REQ]]
+        if os.path.exists(WHL):
+            steps.append(["install", WHL])
+        for s in steps:
+            if _pip_hidden(s) != 0:
+                result["ok"] = False
+                break
+        try:
+            root.after(0, root.destroy)
+        except Exception:
+            pass
+
+    root = tk.Tk()
+    root.title("xiaoe_rvc_ui")
+    root.resizable(False, False)
+    tk.Label(root, text="正在安装依赖，请稍候…").pack(padx=24, pady=(14, 8))
+    bar = ttk.Progressbar(root, mode="indeterminate", length=220)
+    bar.pack(padx=24, pady=(0, 14))
+    bar.start(12)
+    root.update_idletasks()
+    w, h = root.winfo_width(), root.winfo_height()
+    x = max((root.winfo_screenwidth() - w) // 2, 0)
+    y = max((root.winfo_screenheight() - h) // 2, 0)
+    root.geometry(f"+{x}+{y}")
+    threading.Thread(target=run, daemon=True).start()
+    root.mainloop()
+    return result["ok"]
 
 
 def main():
