@@ -51,7 +51,7 @@ STOP_ON_CHANGE_KEYS = (
 
 
 class RvcApp(MainWin):
-    def __init__(self, engine, theme_cfg, rvc_cfg, audio_engine):
+    def __init__(self, engine, theme_cfg, rvc_cfg, audio_engine, show_default=True):
         self.engine = engine
         self.theme_cfg = theme_cfg
         self.rvc_cfg = rvc_cfg
@@ -77,12 +77,16 @@ class RvcApp(MainWin):
             scroll=False,  # MainLayout 自带左右独立滚动区，外层滚动关闭
             maxsize_btn=False,  # 隐藏按钮替代最大化按钮
             hide_btn=True,
+            show_default=show_default,  # 框架参数控制初始显示（启动隐藏用）
         )
         self.setup_ui()
         self.resize(1024, 700)
         self.apply_all()
         self._wire()
         self._setup_tray()
+        # 初始显示由框架 show_default 参数驱动（启动隐藏时 False 则隐藏到托盘）
+        if self.show_default:
+            self.show()
 
     # ------------------------------------------------------------------
     # 样式

@@ -54,12 +54,11 @@ def main():
         theme_cfg=theme_cfg,
         rvc_cfg=rvc_cfg,
         audio_engine=rvc_engine,
+        show_default=not rvc_cfg.get("start_hidden"),
     )
-    # 通用设置：启动隐藏 / 启动自动变声
-    if not rvc_cfg.get("start_hidden"):
-        win.show()
+    # 通用设置：启动自动变声（窗口隐藏时 _start 也可用）
     if rvc_cfg.get("auto_vc"):
-        QTimer.singleShot(600, win._start)  # _start 自带模型检查，窗口隐藏时也可用
+        QTimer.singleShot(600, win._start)
     app.exec()
 
 
