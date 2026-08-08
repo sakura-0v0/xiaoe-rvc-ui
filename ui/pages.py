@@ -231,18 +231,17 @@ def build_voice_page(container, config):
 # ---------------------------------------------------------------------------
 def build_chain_page(container, config, side):
     if side == "I":
-        switch_key, chain_key, plugs_key = "I_noise_reduce", "I_nr_chain", "I_vst_plugins"
+        switch_key, chain_key = "I_noise_reduce", "I_chain"
         switch_text = "输入处理"
         switch_desc = "启用输入处理链（降噪算法 + VST 效果器）"
     else:
-        switch_key, chain_key, plugs_key = "O_noise_reduce", "O_nr_chain", "O_vst_plugins"
+        switch_key, chain_key = "O_noise_reduce", "O_chain"
         switch_text = "输出处理"
         switch_desc = "对变声后音频启用输出处理链（降噪算法 + VST 效果器）"
     CheckItem(switch_text, text=switch_desc,
               config=config, config_name=switch_key, parent_layout=container)
     DragCheckList(f"{'输入' if side == 'I' else '输出'}处理链", NR_ALGORITHMS, config,
-                  chain_key, vst_plugins_name=plugs_key, side=side,
-                  enable_key=switch_key, parent_layout=container)
+                  chain_key, side=side, enable_key=switch_key, parent_layout=container)
     make_tip(CHAIN_TIP, parent_layout=container)
 
 

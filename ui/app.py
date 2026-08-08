@@ -271,8 +271,8 @@ class RvcApp(MainWin):
         self.rvc_cfg.on("index_rate", self._hot_index_rate)
         self.rvc_cfg.on("I_noise_reduce", self._hot_noise_reduce)
         # 降噪链热切换：不重启流，后台重建链引擎后原子替换
-        self.rvc_cfg.on("I_nr_chain", self._hot_nr_chain)
-        self.rvc_cfg.on("O_nr_chain", self._hot_nr_chain)
+        self.rvc_cfg.on("I_chain", self._hot_nr_chain)
+        self.rvc_cfg.on("O_chain", self._hot_nr_chain)
 
         # 不支持热更新 → 自动重启（防抖，避免拖动滑块时疯狂重建）
         self._restart_timer = QTimer(self)
@@ -495,12 +495,15 @@ class RvcApp(MainWin):
         cf = self.rvc_cfg.get("crossfade_length")
         delay = bt + cf + 0.01
         if self.rvc_cfg.get("I_noise_reduce"):
-            for algo in self.rvc_cfg.get("I_nr_chain") or []:
-                if algo == "TorchGate":
+            for el in self.rvc_cfg.get("I_chain") or []:
+                if not el.get("enabled", True) or el.get("type") != "algo":
+                    continue
+                name = el.get("name")
+                if name == "TorchGate":
                     delay += min(cf, 0.04)
-                elif algo == "RNNoise":
+                elif name == "RNNoise":
                     delay += 0.01
-                elif algo == "DTLN":
+                elif name == "DTLN":
                     delay += 0.032
         # VST 插件延迟（链已构建时从引擎读取）
         for attr in ("_in_nr", "_out_nr"):

@@ -209,7 +209,11 @@ class AudioEngine:
             probe = 0.05 * torch.sin(2 * np.pi * 220.0 * phase / 16000.0)
             self.input_wav_res.copy_(probe)
 
-            if self.gui_config.I_noise_reduce and "TorchGate" in self.gui_config.I_nr_chain:
+            if self.gui_config.I_noise_reduce and any(
+                el.get("type") == "algo" and el.get("name") == "TorchGate"
+                and el.get("enabled", True)
+                for el in (self.gui_config.I_chain or [])
+            ):
                 short = self.input_wav[
                     -self.sola_buffer_frame - self.block_frame :
                 ].unsqueeze(0)
@@ -287,8 +291,9 @@ class AudioEngine:
         # 销毁放到下次 _build_nr_chains 重建时统一处理
 
     def _make_chain(self, chain, out_mode):
+        enabled = [el for el in (chain or []) if el.get("enabled", True)]
         return NRChain(
-            chain or [],
+            enabled,
             self.gui_config.samplerate,
             tg=self.tg,
             block_frame=self.block_frame,
@@ -320,10 +325,10 @@ class AudioEngine:
     def _build_nr_chains(self):
         """按配置构建输入/输出降噪链（重建前先释放旧链）。"""
         self._close_nr_chains()
-        if self.gui_config.I_nr_chain:
-            self._in_nr = self._make_chain(self.gui_config.I_nr_chain, False)
-        if self.gui_config.O_nr_chain:
-            self._out_nr = self._make_chain(self.gui_config.O_nr_chain, True)
+        if self.gui_config.I_chain:
+            self._in_nr = self._make_chain(self.gui_config.I_chain, False)
+        if self.gui_config.O_chain:
+            self._out_nr = self._make_chain(self.gui_config.O_chain, True)
         # 预热 DTLN（onnxruntime 首次推理开销大，避免第一个音频块卡顿）
         self._warmup_nr()
 
@@ -359,8 +364,8 @@ class AudioEngine:
 
     def _do_build_nr(self):
         """读当前配置构建新链并原子替换；旧链进退休区延迟销毁（防回调 in-flight 竞态）。"""
-        in_chain = list(self.gui_config.I_nr_chain or [])
-        out_chain = list(self.gui_config.O_nr_chain or [])
+        in_chain = list(self.gui_config.I_chain or [])
+        out_chain = list(self.gui_config.O_chain or [])
         new_in = self._make_chain(in_chain, False) if in_chain else None
         new_out = self._make_chain(out_chain, True) if out_chain else None
         block = torch.zeros(self.block_frame, device=self.config.device, dtype=torch.float32)
@@ -451,7 +456,7 @@ class AudioEngine:
             self.block_frame_16k :
         ].clone()
         # input noise reduction and resampling
-        if self.gui_config.I_noise_reduce and self.gui_config.I_nr_chain:
+        if self.gui_config.I_noise_reduce and self.gui_config.I_chain:
             self.input_wav_denoise[: -self.block_frame] = self.input_wav_denoise[
                 self.block_frame :
             ].clone()
@@ -497,7 +502,7 @@ class AudioEngine:
         # output noise reduction
         if (
             self.gui_config.O_noise_reduce
-            and self.gui_config.O_nr_chain
+            and self.gui_config.O_chain
             and self.function == "vc"
         ):
             infer_wav = self._out_nr(infer_wav) if self._out_nr is not None else infer_wav

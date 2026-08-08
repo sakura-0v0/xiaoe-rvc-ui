@@ -5,7 +5,7 @@ import re
 
 # 应用
 APP_NAME = "RVC实时变声-小娥UI版"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 # 适配的 RVC 打包版本（随 RVC 打包更新）
 ADAPTED_RVC_VERSION = "RVC 20260718"

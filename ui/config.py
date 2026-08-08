@@ -27,6 +27,9 @@ CONFIG_TO_PARAMS = {
     "crossfade_length": "crossfade_time",
 }
 
+# 内置降噪算法（配置值）
+ALGORITHMS = ["TorchGate", "RNNoise", "DTLN"]
+
 # 原 realtime_gui.py 的 config.json schema 默认值
 RVC_CONFIG_DEFAULTS = {
     "pth_path": "",
@@ -47,13 +50,11 @@ RVC_CONFIG_DEFAULTS = {
     "f0method": "rmvpe",
     "I_noise_reduce": False,
     "O_noise_reduce": False,
-    # 降噪链（顺序即执行顺序，空=该侧不降噪）
-    # 元素：算法字符串（"TorchGate"/"RNNoise"/"DTLN"）或 VST 插件 {"type":"vst","path":...}
-    "I_nr_chain": [],
-    "O_nr_chain": [],
-    # 已添加的 VST3 插件路径列表（决定行存在，勾选状态由链决定）
-    "I_vst_plugins": [],
-    "O_vst_plugins": [],
+    # 处理链（顺序即执行顺序，空=该侧不处理）。统一列表：
+    # 元素为 {"type":"algo","name":"RNNoise","enabled":true} 或 {"type":"vst","path":...,"enabled":true}，
+    # 列表顺序=全部行顺序（含未勾选），enabled=是否启用。一个列表表达顺序/启用/插件存在。
+    "I_chain": [],
+    "O_chain": [],
     # 转换模式：输入监听 / 输出变声（互斥，配置双绑）
     "im": False,
     "vc": True,
@@ -79,11 +80,9 @@ class Params:
         self.extra_time = 2.5
         self.I_noise_reduce = False
         self.O_noise_reduce = False
-        # 链元素：算法字符串或 {"type":"vst","path":...}（VST3 插件）
-        self.I_nr_chain = []
-        self.O_nr_chain = []
-        self.I_vst_plugins = []
-        self.O_vst_plugins = []
+        # 处理链：统一列表（元素 {"type":"algo"/"vst", ..., "enabled":bool}）
+        self.I_chain = []
+        self.O_chain = []
         self.rms_mix_rate = 0.0
         self.index_rate = 0.0
         self.f0method = "rmvpe"
@@ -144,26 +143,59 @@ class RvcConfigManager:
             if k in self._def:
                 self._d[k] = v
                 self._sync_params(k, v)
-        # 旧版降噪开关（bool）→ 链配置迁移：开关开着默认给 TorchGate
+        # 旧链配置（勾选链/插件列表/行序）→ 统一 I_chain 迁移（优先，保留已勾选项）
+        for chain_key, vst_key, order_key, new_key in (
+            ("I_nr_chain", "I_vst_plugins", "I_chain_order", "I_chain"),
+            ("O_nr_chain", "O_vst_plugins", "O_chain_order", "O_chain"),
+        ):
+            if not self._d.get(new_key) and (data.get(chain_key) or data.get(vst_key)):
+                self._d[new_key] = self._migrate_chain(
+                    data.get(chain_key), data.get(vst_key), data.get(order_key)
+                )
+                self._sync_params(new_key, self._d[new_key])
+        # 旧版降噪开关（bool）→ 兜底迁移：无旧链数据时开关开着默认给 TorchGate
         for bool_key, chain_key in (
-            ("I_noise_reduce", "I_nr_chain"),
-            ("O_noise_reduce", "O_nr_chain"),
+            ("I_noise_reduce", "I_chain"),
+            ("O_noise_reduce", "O_chain"),
         ):
-            if bool_key in data and chain_key not in data:
-                self._d[chain_key] = ["TorchGate"] if data.get(bool_key) else []
+            if not self._d.get(chain_key) and bool_key in data:
+                self._d[chain_key] = (
+                    [{"type": "algo", "name": "TorchGate", "enabled": True}]
+                    if data.get(bool_key) else []
+                )
                 self._sync_params(chain_key, self._d[chain_key])
-        # VST 插件列表迁移：从链中提取 VST 路径（旧数据链里直接含 VST dict）
-        for chain_key, plugins_key in (
-            ("I_nr_chain", "I_vst_plugins"),
-            ("O_nr_chain", "O_vst_plugins"),
-        ):
-            if plugins_key not in self._d or not self._d[plugins_key]:
-                self._d[plugins_key] = [
-                    el["path"] for el in (self._d.get(chain_key) or [])
-                    if isinstance(el, dict) and el.get("type") == "vst" and el.get("path")
-                ]
-                self._sync_params(plugins_key, self._d[plugins_key])
+        # 最终兜底：新用户无任何数据 → 全部算法未勾选
+        for new_key in ("I_chain", "O_chain"):
+            if not self._d.get(new_key):
+                self._d[new_key] = self._migrate_chain(None, None, None)
+                self._sync_params(new_key, self._d[new_key])
         self.save()
+
+    @staticmethod
+    def _migrate_chain(chain, plugins, order):
+        """旧链配置合并生成统一列表：勾选元素 → 未勾选插件 → 未勾选算法。"""
+        result = []
+        keys = set()
+
+        def add(kind, key, enabled):
+            if key in keys:
+                return
+            keys.add(key)
+            result.append(
+                {"type": kind, **({"name": key} if kind == "algo" else {"path": key}),
+                 "enabled": enabled}
+            )
+
+        for el in (chain or []):
+            if isinstance(el, str):
+                add("algo", el, True)
+            elif isinstance(el, dict) and el.get("path"):
+                add("vst", el["path"], True)
+        for p in (plugins or []):
+            add("vst", p, False)
+        for value in ALGORITHMS:
+            add("algo", value, False)
+        return result
 
     def _load_legacy(self):
         """本项目配置不存在时，读原版 RVC configs/config.json；失败返回空。"""

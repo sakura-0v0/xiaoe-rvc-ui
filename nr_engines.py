@@ -177,28 +177,30 @@ class DTLNDenoiser:
 
 
 class NRChain:
-    """降噪链：按顺序串联多个引擎，上级输出喂给下级。
+    """处理链：按顺序串联多个引擎，上级输出喂给下级。
 
-    chain 元素可为算法字符串（构建内置引擎）或插件 dict（经 vst_builder 注入构建，
-    保持链内混排顺序）；vst_builder 返回 None 表示该元素被跳过。
+    chain 元素统一为 dict：{"type":"algo","name":...} 或 {"type":"vst","path":...}，
+    已由上层过滤 enabled。vst_builder 返回 None 表示该插件被跳过。
     """
 
     def __init__(self, chain, sr, tg, block_frame, sola_frame, fade_in, fade_out, ref, device, out_mode=False, vst_builder=None):
         self.engines = []
         for el in chain:
-            if isinstance(el, str):
-                if el == "TorchGate":
+            if el.get("type") == "vst":
+                if vst_builder is not None:
+                    eng = vst_builder(el)
+                    if eng is not None:
+                        self.engines.append(eng)
+            else:
+                name = el.get("name")
+                if name == "TorchGate":
                     self.engines.append(
                         TorchGateNR(tg, block_frame, sola_frame, fade_in, fade_out, ref, device, out_mode)
                     )
-                elif el == "RNNoise":
+                elif name == "RNNoise":
                     self.engines.append(RNNoiseDenoiser(sr, device))
-                elif el == "DTLN":
+                elif name == "DTLN":
                     self.engines.append(DTLNDenoiser(NR_MODEL_DIR, sr, device))
-            elif isinstance(el, dict) and vst_builder is not None:
-                eng = vst_builder(el)
-                if eng is not None:
-                    self.engines.append(eng)
 
     def __call__(self, x):
         for eng in self.engines:
