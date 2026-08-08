@@ -5,7 +5,7 @@ import re
 
 # 应用
 APP_NAME = "RVC实时变声-小娥UI版"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # 适配的 RVC 打包版本（随 RVC 打包更新）
 ADAPTED_RVC_VERSION = "RVC 20260718"
@@ -15,9 +15,8 @@ RVC_GITHUB_URL = (
     "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI"
 )
 RVC_AUTHOR_BILIBILI_URL = "https://space.bilibili.com/5760446"
-AUTHOR_GITHUB_URL = "https://github.com/sakura-0v0"
+APP_GITHUB_URL = "https://github.com/sakura-0v0/xiaoe-rvc-ui"
 AUTHOR_BILIBILI_URL = "https://space.bilibili.com/327250702"
-APP_GITHUB_URL = ""  # 项目仓库暂未创建，后续再改
 
 
 def detect_rvc_version():

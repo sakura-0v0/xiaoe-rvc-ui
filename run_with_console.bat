@@ -19,7 +19,7 @@ if not exist "%PYEXE%" (
 cd /d "%SCRIPT_DIR%"
 
 rem Check deps; install automatically on first run.
-"%PYEXE%" -c "import xiaoe_ui, PySide6, win32com" >nul 2>&1
+"%PYEXE%" -c "import xiaoe_ui, PySide6, win32com, pyrnnoise, pedalboard" >nul 2>&1
 if errorlevel 1 (
     echo Dependencies not found. Installing first run...
     "%PYEXE%" -m pip install --disable-pip-version-check -r "requirements.txt"

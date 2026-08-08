@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 import traceback
 
@@ -13,6 +14,8 @@ import torchaudio.transforms as tat
 from tools.torchgate import TorchGate
 from infer import rtrvc as rvc_for_realtime
 from tools.cuda_graph import cuda_graph_enabled, run_cuda_graph
+
+from nr_engines import NRChain
 
 flag_vc = False
 
@@ -39,6 +42,14 @@ class AudioEngine:
         self.delay_time = 0
         self.stream = None
         self.on_status = None  # 回调 on_status(name, value)，UI 侧挂接做线程安全更新
+        self._in_nr = None
+        self._out_nr = None
+        self._nr_lock = threading.Lock()
+        self._nr_building = False
+        self._nr_pending = False
+        # 退休链延迟销毁：音频回调可能仍在 in-flight 旧链（含 VST 引擎 C++ 实例），
+        # 立即析构会 use-after-free 崩溃；3 秒后统一 close
+        self._retired_chains = []
 
     # ------------------------------------------------------------------
     # UI 状态回传
@@ -180,6 +191,7 @@ class AudioEngine:
         self.tg = TorchGate(
             sr=self.gui_config.samplerate, n_fft=4 * self.zc, prop_decrease=0.9
         ).to(self.config.device)
+        self._build_nr_chains()
         self.prewarm_cuda_graph()
         self.start_stream()
         self._emit("samplerate", self.gui_config.samplerate)
@@ -197,7 +209,7 @@ class AudioEngine:
             probe = 0.05 * torch.sin(2 * np.pi * 220.0 * phase / 16000.0)
             self.input_wav_res.copy_(probe)
 
-            if self.gui_config.I_noise_reduce:
+            if self.gui_config.I_noise_reduce and "TorchGate" in self.gui_config.I_nr_chain:
                 short = self.input_wav[
                     -self.sola_buffer_frame - self.block_frame :
                 ].unsqueeze(0)
@@ -271,6 +283,137 @@ class AudioEngine:
                 self.stream.close()
                 self.stream = None
             self._emit("running", False)
+        # 不在停止时销毁降噪链：重启/停流期间的 in-flight 回调仍可能访问，
+        # 销毁放到下次 _build_nr_chains 重建时统一处理
+
+    def _make_chain(self, chain, out_mode):
+        return NRChain(
+            chain or [],
+            self.gui_config.samplerate,
+            tg=self.tg,
+            block_frame=self.block_frame,
+            sola_frame=self.sola_buffer_frame,
+            fade_in=self.fade_in_window,
+            fade_out=self.fade_out_window,
+            ref=self.output_buffer if out_mode else self.input_wav,
+            device=self.config.device,
+            out_mode=out_mode,
+            vst_builder=lambda el: self._build_vst(el, out_mode),
+        )
+
+    def _build_vst(self, el, out_mode):
+        """构建 VST 引擎；失败通知并返回 None（该元素直通跳过，链其余继续）。"""
+        path = el.get("path", "") if isinstance(el, dict) else ""
+        if not path:
+            return None
+        try:
+            from vst_engine import VSTEngine, vst_loader
+            return vst_loader.call(
+                lambda: VSTEngine(path, self.gui_config.samplerate, self.config.device)
+            )
+        except Exception as e:
+            print(f"[vst_error] load failed: {path} -> {e}", file=sys.stderr)
+            traceback.print_exc()
+            self._emit("vst_error", ("O" if out_mode else "I", path, str(e)))
+            return None
+
+    def _build_nr_chains(self):
+        """按配置构建输入/输出降噪链（重建前先释放旧链）。"""
+        self._close_nr_chains()
+        if self.gui_config.I_nr_chain:
+            self._in_nr = self._make_chain(self.gui_config.I_nr_chain, False)
+        if self.gui_config.O_nr_chain:
+            self._out_nr = self._make_chain(self.gui_config.O_nr_chain, True)
+        # 预热 DTLN（onnxruntime 首次推理开销大，避免第一个音频块卡顿）
+        self._warmup_nr()
+
+    def hot_update_nr(self):
+        """热切换降噪链：后台构建新链并原子替换，不重启流。
+
+        仅运行中生效；未运行时由 start_vc 按配置构建。
+        """
+        if not flag_vc or self.stream is None:
+            return
+        with self._nr_lock:
+            if self._nr_building:
+                self._nr_pending = True
+                return
+            self._nr_building = True
+        threading.Thread(target=self._build_nr_async, daemon=True).start()
+
+    def _build_nr_async(self):
+        try:
+            while True:
+                self._do_build_nr()
+                with self._nr_lock:
+                    if self._nr_pending:
+                        self._nr_pending = False
+                        continue
+                    self._nr_building = False
+                    return
+        except Exception:
+            traceback.print_exc()
+            with self._nr_lock:
+                self._nr_building = False
+                self._nr_pending = False
+
+    def _do_build_nr(self):
+        """读当前配置构建新链并原子替换；旧链进退休区延迟销毁（防回调 in-flight 竞态）。"""
+        in_chain = list(self.gui_config.I_nr_chain or [])
+        out_chain = list(self.gui_config.O_nr_chain or [])
+        new_in = self._make_chain(in_chain, False) if in_chain else None
+        new_out = self._make_chain(out_chain, True) if out_chain else None
+        block = torch.zeros(self.block_frame, device=self.config.device, dtype=torch.float32)
+        for nr in (new_in, new_out):
+            if nr is not None:
+                nr(block)  # 预热 DTLN 首次推理
+        old_in, old_out = self._in_nr, self._out_nr
+        self._in_nr = new_in
+        self._out_nr = new_out
+        if old_in is not None or old_out is not None:
+            self._retired_chains.append((old_in, old_out, time.time()))
+        self._sweep_retired()
+
+    def _sweep_retired(self):
+        """销毁到期（>3s）的退休链；回调单块处理远小于 3 秒，可安全 close。"""
+        now = time.time()
+        keep = []
+        for old_in, old_out, t in self._retired_chains:
+            if now - t >= 3.0:
+                for nr in (old_in, old_out):
+                    if nr is not None:
+                        try:
+                            nr.close()
+                        except Exception:
+                            traceback.print_exc()
+            else:
+                keep.append((old_in, old_out, t))
+        self._retired_chains = keep
+
+    def _warmup_nr(self):
+        block = torch.zeros(self.block_frame, device=self.config.device, dtype=torch.float32)
+        for nr in (getattr(self, "_in_nr", None), getattr(self, "_out_nr", None)):
+            if nr is not None:
+                try:
+                    nr(block)
+                except Exception:
+                    traceback.print_exc()
+
+    def _close_nr_chains(self):
+        # 当前链 + 退休区全部 close（停止/重启时 in-flight 回调已停，可安全销毁）
+        for nr in (getattr(self, "_in_nr", None), getattr(self, "_out_nr", None)):
+            if nr is not None:
+                nr.close()
+        self._in_nr = None
+        self._out_nr = None
+        for old_in, old_out, _t in self._retired_chains:
+            for nr in (old_in, old_out):
+                if nr is not None:
+                    try:
+                        nr.close()
+                    except Exception:
+                        traceback.print_exc()
+        self._retired_chains = []
 
     # ------------------------------------------------------------------
     # 实时音频处理（逐字搬移）
@@ -308,39 +451,29 @@ class AudioEngine:
             self.block_frame_16k :
         ].clone()
         # input noise reduction and resampling
-        if self.gui_config.I_noise_reduce:
+        if self.gui_config.I_noise_reduce and self.gui_config.I_nr_chain:
             self.input_wav_denoise[: -self.block_frame] = self.input_wav_denoise[
                 self.block_frame :
             ].clone()
-            input_wav = self.input_wav[-self.sola_buffer_frame - self.block_frame :]
-            input_wav = self.tg(
-                input_wav.unsqueeze(0), self.input_wav.unsqueeze(0)
-            ).squeeze(0)
-            input_wav[: self.sola_buffer_frame] *= self.fade_in_window
-            input_wav[: self.sola_buffer_frame] += (
-                self.nr_buffer * self.fade_out_window
-            )
-            self.input_wav_denoise[-self.block_frame :] = input_wav[
-                : self.block_frame
-            ]
-            self.nr_buffer[:] = input_wav[self.block_frame :]
-            resample_input = self.input_wav_denoise[
-                -self.block_frame - 2 * self.zc :
-            ]
-            self.input_wav_res[-self.block_frame_16k - 160 :] = run_cuda_graph(
-                self.resampler,
-                "realtime-input-resample",
-                lambda audio: self.resampler(audio),
-                resample_input,
-            )[160:]
+            block = self.input_wav[-self.block_frame :]
+            denoised = self._in_nr(block) if self._in_nr is not None else block
+            self.input_wav_denoise[-self.block_frame :] = denoised
         else:
-            resample_input = self.input_wav[-indata.shape[0] - 2 * self.zc :]
-            self.input_wav_res[-160 * (indata.shape[0] // self.zc + 1) :] = run_cuda_graph(
-                self.resampler,
-                "realtime-input-resample",
-                lambda audio: self.resampler(audio),
-                resample_input,
-            )[160:]
+            # 无降噪（未开或链为空）：直通，同样维护 input_wav_denoise，
+            # 保证重采样路径与链分支完全一致，切换时 input_wav_res 不错位
+            self.input_wav_denoise[: -self.block_frame] = self.input_wav_denoise[
+                self.block_frame :
+            ].clone()
+            self.input_wav_denoise[-self.block_frame :] = self.input_wav[
+                -self.block_frame :
+            ]
+        resample_input = self.input_wav_denoise[-self.block_frame - 2 * self.zc :]
+        self.input_wav_res[-self.block_frame_16k - 160 :] = run_cuda_graph(
+            self.resampler,
+            "realtime-input-resample",
+            lambda audio: self.resampler(audio),
+            resample_input,
+        )[160:]
         # infer
         if self.function == "vc":
             infer_wav = self.rvc.infer(
@@ -362,14 +495,12 @@ class AudioEngine:
         else:
             infer_wav = self.input_wav[self.extra_frame :].clone()
         # output noise reduction
-        if self.gui_config.O_noise_reduce and self.function == "vc":
-            self.output_buffer[: -self.block_frame] = self.output_buffer[
-                self.block_frame :
-            ].clone()
-            self.output_buffer[-self.block_frame :] = infer_wav[-self.block_frame :]
-            infer_wav = self.tg(
-                infer_wav.unsqueeze(0), self.output_buffer.unsqueeze(0)
-            ).squeeze(0)
+        if (
+            self.gui_config.O_noise_reduce
+            and self.gui_config.O_nr_chain
+            and self.function == "vc"
+        ):
+            infer_wav = self._out_nr(infer_wav) if self._out_nr is not None else infer_wav
         # volume envelop mixing
         if self.gui_config.rms_mix_rate < 1 and self.function == "vc":
             if self.gui_config.I_noise_reduce:

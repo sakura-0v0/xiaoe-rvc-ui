@@ -40,5 +40,5 @@ if errorlevel 1 (
     exit /b 1
 )
 echo.
-echo Done! Double-click run.bat to launch the new RVC UI.
+echo Done! Double-click run.vbs to launch the new RVC UI.
 pause

@@ -2,7 +2,7 @@ import os
 import sys
 
 # 本文件位于 xiaoe_rvc_ui/ 下，RVC 根目录是其父目录。
-# run.bat 以 -I 隔离模式启动，显式把脚本目录与 RVC 根目录都加进 sys.path，
+# launcher.py / run_with_console.bat 以 -I 隔离模式启动，显式把脚本目录与 RVC 根目录都加进 sys.path，
 # 否则 from audio_engine import ... / from configs.config import Config 等导入会失败。
 XIAOE_DIR = os.path.dirname(os.path.abspath(__file__))
 RVC_ROOT = os.path.dirname(XIAOE_DIR)

@@ -21,6 +21,7 @@ from xiaoe_ui import (
     info,
     make_form_row,
     make_line,
+    make_tip,
 )
 
 from fast_desktop import (
@@ -38,9 +39,28 @@ from ui.model_card import (
     ModelCard,
     ModelEditDialog,
 )
+from ui.nr_chain import DragCheckList
 
 SR_OPTIONS = ["使用模型采样率", "使用设备采样率"]
 SR_VALUES = ["sr_model", "sr_device"]
+
+# 可选降噪算法：(显示名, 配置值)。编号=降噪效果，编号越大效果越强
+NR_ALGORITHMS = [
+    ("1. TorchGate（降噪算法）", "TorchGate"),
+    ("2. RNNoise（降噪算法）", "RNNoise"),
+    ("3. DTLN（降噪算法）", "DTLN"),
+]
+
+# 处理链页共用说明（输入/输出两页引用同一字符串）
+CHAIN_TIP = (
+    "使用方法：勾选要启用的算法，按住 ≡ 拖拽调整处理顺序（从上到下依次执行）。\n"
+    "1. TorchGate —— 频谱门控降噪（内置默认）\n"
+    "2. RNNoise —— 经典神经网络降噪，效果不错且占用低（推荐）\n"
+    "3. DTLN —— 深度学习降噪，占用最高，但实际效果似乎反而不如 2 号，可自己试试对比\n"
+    "\nVST3 插件：点「+ 添加 VST3」选 .vst3 文件即可混入链中（与算法同链自由排序）。\n"
+    "「设置」在独立进程弹出插件原厂窗口，不影响实时音频；调整参数实时生效并自动保存。\n"
+    "重开软件自动恢复（个别插件需先打开一次界面才应用保存的参数）。"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -187,34 +207,51 @@ def build_voice_page(container, config):
         config=config, config_name="f0method",
         options=["pm", "rmvpe", "fcpe"], parent_layout=container,
     )
-    CheckItem("输入降噪", text="降低输入噪声",
-              config=config, config_name="I_noise_reduce", parent_layout=container)
-    CheckItem("输出降噪", text="降低输出噪声",
-              config=config, config_name="O_noise_reduce", parent_layout=container)
 
     make_line(container, bold=True)
     SliderItem(
         "采样长度", text="每次处理的音频时长，越短延迟越低",
         config=config, config_name="block_time",
-        config_range=(0.02, 1.5), step=0.01, parent_layout=container,
+        config_range=(0.02, 1.5), step=0.01, live=False, parent_layout=container,
     )
     SliderItem(
         "淡入淡出长度", text="音频块衔接时的平滑过渡时长",
         config=config, config_name="crossfade_length",
-        config_range=(0.01, 0.15), step=0.01, parent_layout=container,
+        config_range=(0.01, 0.15), step=0.01, live=False, parent_layout=container,
     )
     SliderItem(
         "额外推理时长", text="每块额外预留的推理时间，越大越稳定",
         config=config, config_name="extra_time",
-        config_range=(0.05, 5.0), step=0.01, parent_layout=container,
+        config_range=(0.05, 5.0), step=0.01, live=False, parent_layout=container,
     )
+
+
+# ---------------------------------------------------------------------------
+# 处理链页（输入/输出共用，side 区分）
+# ---------------------------------------------------------------------------
+def build_chain_page(container, config, side):
+    if side == "I":
+        switch_key, chain_key, plugs_key = "I_noise_reduce", "I_nr_chain", "I_vst_plugins"
+        switch_text = "输入处理"
+        switch_desc = "启用输入处理链（降噪算法 + VST 效果器）"
+    else:
+        switch_key, chain_key, plugs_key = "O_noise_reduce", "O_nr_chain", "O_vst_plugins"
+        switch_text = "输出处理"
+        switch_desc = "对变声后音频启用输出处理链（降噪算法 + VST 效果器）"
+    CheckItem(switch_text, text=switch_desc,
+              config=config, config_name=switch_key, parent_layout=container)
+    DragCheckList(f"{'输入' if side == 'I' else '输出'}处理链", NR_ALGORITHMS, config,
+                  chain_key, vst_plugins_name=plugs_key, side=side,
+                  enable_key=switch_key, parent_layout=container)
+    make_tip(CHAIN_TIP, parent_layout=container)
 
 
 # ---------------------------------------------------------------------------
 # 通用设置页
 # ---------------------------------------------------------------------------
 def build_settings_page(container, config):
-    run_bat = os.path.join(XIAOE_DIR, "run.bat")
+    # 用 run.vbs 作为启动目标（隐藏 cmd 窗口，快捷方式/自启不闪黑框）
+    run_launcher = os.path.join(XIAOE_DIR, "run.vbs")
     icon = os.path.join(XIAOE_DIR, "static", "logo.ico")
     lnk_name = f"{APP_NAME}.lnk"
 
@@ -222,7 +259,7 @@ def build_settings_page(container, config):
         try:
             create_shortcut_file(
                 os.path.join(get_startup_path(), lnk_name),
-                run_bat, XIAOE_DIR, icon,
+                run_launcher, XIAOE_DIR, icon,
             )
             info("成功", "已设置开机自启")
         except Exception as e:
@@ -243,7 +280,7 @@ def build_settings_page(container, config):
             try:
                 create_shortcut_file(
                     os.path.join(get_desktop_path(), lnk_name),
-                    run_bat, XIAOE_DIR, icon,
+                    run_launcher, XIAOE_DIR, icon,
                 )
                 info("成功", "桌面快捷方式已创建")
             except Exception as e:

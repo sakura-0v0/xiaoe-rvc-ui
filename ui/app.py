@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 import traceback
 
@@ -25,11 +26,13 @@ from xiaoe_ui import (
 
 import info
 from ui.config import LIBRARY_PATH, MODELS_DIR, RVC_ROOT, ModelLibrary
+from vst_engine import editor_manager, vst_config
 from ui.model_card import ModelEditDialog
 from ui.pages import (
     AudioPage,
     BottomBar,
     ModelPage,
+    build_chain_page,
     build_settings_page,
     build_voice_page,
 )
@@ -70,7 +73,7 @@ class RvcApp(MainWin):
         self._add_card_qss()
 
         super().__init__(
-            win_title="RVC 实时变声",
+            win_title=info.APP_NAME,
             scroll=False,  # MainLayout 自带左右独立滚动区，外层滚动关闭
             maxsize_btn=False,  # 隐藏按钮替代最大化按钮
             hide_btn=True,
@@ -141,7 +144,7 @@ class RvcApp(MainWin):
         self._build_home(page_home)
 
         # 模型库（配置项直接放页面布局，右侧滚动由 MainLayout 负责）
-        page_model = left.add_page("model", "模型库", icon="🎤")
+        page_model = left.add_page("model", "模型列表", icon="🧬")
         self.model_page = ModelPage(
             page_model,
             self.library,
@@ -150,15 +153,25 @@ class RvcApp(MainWin):
         )
         page_model.addStretch(1)
 
-        # 变声设置
-        page_voice = left.add_page("voice", "变声设置", icon="🎛")
-        build_voice_page(page_voice, self.rvc_cfg)
-        page_voice.addStretch(1)
-
         # 音频设备
-        page_audio = left.add_page("audio", "音频设备", icon="🎚")
+        page_audio = left.add_page("audio", "音频设备", icon="📢")
         self.audio_page = AudioPage(page_audio, self.rvc_cfg, self.ae)
         page_audio.addStretch(1)
+
+
+        # 音频处理（输入/输出二级页）
+        fx_group = left.add_group("fx", "音频处理", icon="🎛")
+        page_in = fx_group.add_page("nr_in", "输入处理", icon="📥")
+        build_chain_page(page_in, self.rvc_cfg, "I")
+        page_in.addStretch(1)
+        page_out = fx_group.add_page("nr_out", "输出处理", icon="📤")
+        build_chain_page(page_out, self.rvc_cfg, "O")
+        page_out.addStretch(1)
+
+        # 变声设置
+        page_voice = left.add_page("voice", "变声设置", icon="🎤")
+        build_voice_page(page_voice, self.rvc_cfg)
+        page_voice.addStretch(1)
 
         # 通用设置
         page_settings = left.add_page("settings", "通用设置", icon="⚙")
@@ -166,7 +179,7 @@ class RvcApp(MainWin):
         page_settings.addStretch(1)
 
         # 主题（ThemePage 内部自己会在末尾 addStretch）
-        page_theme = left.add_page("theme", "主题", icon="🎨")
+        page_theme = left.add_page("theme", "自定主题", icon="🎨")
         ThemePage(
             page_theme,
             engine=self.engine,
@@ -199,7 +212,7 @@ class RvcApp(MainWin):
         title_frame.setToolTip("点击打开项目 GitHub")
         title_frame.on_left_click(
             lambda: QDesktopServices.openUrl(
-                QUrl(info.APP_GITHUB_URL or info.AUTHOR_GITHUB_URL)
+                QUrl(info.APP_GITHUB_URL)
             )
         )
         title_layout = QHBoxLayout(title_frame)
@@ -236,15 +249,15 @@ class RvcApp(MainWin):
             page.addWidget(frame)
 
         info_row("软件版本", f"v{info.APP_VERSION}")
-        info_row("适配 RVC 版本", info.ADAPTED_RVC_VERSION)
-        info_row("当前 RVC 版本", info.detect_rvc_version())
+        info_row("作者B站", "一只黄小娥", info.AUTHOR_BILIBILI_URL)
+        info_row("RVC 适配版本", info.ADAPTED_RVC_VERSION)
+        info_row("RVC 当前版本", info.detect_rvc_version())
         info_row(
             "RVC 原项目",
             "Retrieval-based-Voice-Conversion-WebUI",
             info.RVC_GITHUB_URL,
         )
-        info_row("作者 B站", "一只黄小娥", info.AUTHOR_BILIBILI_URL)
-        info_row("RVC 作者 B站", "花儿不哭", info.RVC_AUTHOR_BILIBILI_URL)
+        info_row("RVC 作者B站", "花儿不哭", info.RVC_AUTHOR_BILIBILI_URL)
 
     # ------------------------------------------------------------------
     # 信号接线
@@ -257,6 +270,9 @@ class RvcApp(MainWin):
         self.rvc_cfg.on("formant", self._hot_formant)
         self.rvc_cfg.on("index_rate", self._hot_index_rate)
         self.rvc_cfg.on("I_noise_reduce", self._hot_noise_reduce)
+        # 降噪链热切换：不重启流，后台重建链引擎后原子替换
+        self.rvc_cfg.on("I_nr_chain", self._hot_nr_chain)
+        self.rvc_cfg.on("O_nr_chain", self._hot_nr_chain)
 
         # 不支持热更新 → 自动重启（防抖，避免拖动滑块时疯狂重建）
         self._restart_timer = QTimer(self)
@@ -274,6 +290,10 @@ class RvcApp(MainWin):
         self.bottom_bar.start_btn.clicked.connect(self._start)
         self.bottom_bar.stop_btn.clicked.connect(self._stop)
 
+        # VST 编辑器子进程回调（参数实时同步即持久化，关窗无需重建链）
+        editor_manager.on_error = self._on_vst_editor_error
+        editor_manager.on_param = self._on_vst_param
+
         self._update_delay()
         self._update_model_label()
         self._set_ui_starting(False)  # 初始化按钮状态：未运行时停止按钮置灰
@@ -288,6 +308,9 @@ class RvcApp(MainWin):
             run_in_main(lambda: self.bottom_bar.sr_label.setText(f"采样率:{value}"))
         elif name == "running":
             run_in_main(lambda: self._set_running(value))
+        elif name == "vst_error":
+            side, path, msg = value
+            run_in_main(lambda: self._notify(f"VST 插件加载失败（{path}）：{msg}"))
 
     def _set_running(self, running):
         self._running = running
@@ -328,6 +351,10 @@ class RvcApp(MainWin):
                 traceback.print_exc()
 
     def _hot_noise_reduce(self, v):
+        self._update_delay()
+
+    def _hot_nr_chain(self, v):
+        self.ae.hot_update_nr()
         self._update_delay()
 
     def _make_restart_on_change(self):
@@ -426,6 +453,23 @@ class RvcApp(MainWin):
         if self.rvc_cfg.get("notify_show"):
             self.notify.show(text)
 
+    def _on_vst_editor_error(self, side, path, msg):
+        run_in_main(lambda: self._notify(msg))
+
+    def _on_vst_param(self, side, path, name, value):
+        """编辑器子进程的参数变化：实时应用到音频链实例 + 写入配置（即持久化）。"""
+        vst_config.set_param(path, name, value)
+        nr = getattr(self.ae, "_in_nr" if side == "I" else "_out_nr", None)
+        if nr is None:
+            return
+        for eng in getattr(nr, "engines", []):
+            if getattr(eng, "path", None) == path and getattr(eng, "plugin", None) is not None:
+                try:
+                    setattr(eng.plugin, name, value)
+                except Exception:
+                    pass
+                return
+
     def _stop(self):
         # 用户手动停止：取消待执行的重启
         self._restart_timer.stop()
@@ -451,7 +495,22 @@ class RvcApp(MainWin):
         cf = self.rvc_cfg.get("crossfade_length")
         delay = bt + cf + 0.01
         if self.rvc_cfg.get("I_noise_reduce"):
-            delay += min(cf, 0.04)
+            for algo in self.rvc_cfg.get("I_nr_chain") or []:
+                if algo == "TorchGate":
+                    delay += min(cf, 0.04)
+                elif algo == "RNNoise":
+                    delay += 0.01
+                elif algo == "DTLN":
+                    delay += 0.032
+        # VST 插件延迟（链已构建时从引擎读取）
+        for attr in ("_in_nr", "_out_nr"):
+            nr = getattr(self.ae, attr, None)
+            if nr is None:
+                continue
+            for eng in getattr(nr, "engines", []):
+                lat = getattr(eng, "latency", 0) or 0
+                if lat:
+                    delay += lat / max(self.ae.gui_config.samplerate, 1)
         if self.ae.stream is not None:
             try:
                 delay += self.ae.stream.latency[-1]
@@ -542,10 +601,12 @@ class RvcApp(MainWin):
 
     def _quit_app(self):
         self.ae.stop_stream()
+        editor_manager.close_all()
         self.tray.hide()
         QApplication.instance().quit()
 
     # ------------------------------------------------------------------
     def closeEvent(self, event):
         self.ae.stop_stream()
+        editor_manager.close_all()
         super().closeEvent(event)

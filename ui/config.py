@@ -47,6 +47,13 @@ RVC_CONFIG_DEFAULTS = {
     "f0method": "rmvpe",
     "I_noise_reduce": False,
     "O_noise_reduce": False,
+    # 降噪链（顺序即执行顺序，空=该侧不降噪）
+    # 元素：算法字符串（"TorchGate"/"RNNoise"/"DTLN"）或 VST 插件 {"type":"vst","path":...}
+    "I_nr_chain": [],
+    "O_nr_chain": [],
+    # 已添加的 VST3 插件路径列表（决定行存在，勾选状态由链决定）
+    "I_vst_plugins": [],
+    "O_vst_plugins": [],
     # 转换模式：输入监听 / 输出变声（互斥，配置双绑）
     "im": False,
     "vc": True,
@@ -72,6 +79,11 @@ class Params:
         self.extra_time = 2.5
         self.I_noise_reduce = False
         self.O_noise_reduce = False
+        # 链元素：算法字符串或 {"type":"vst","path":...}（VST3 插件）
+        self.I_nr_chain = []
+        self.O_nr_chain = []
+        self.I_vst_plugins = []
+        self.O_vst_plugins = []
         self.rms_mix_rate = 0.0
         self.index_rate = 0.0
         self.f0method = "rmvpe"
@@ -132,6 +144,25 @@ class RvcConfigManager:
             if k in self._def:
                 self._d[k] = v
                 self._sync_params(k, v)
+        # 旧版降噪开关（bool）→ 链配置迁移：开关开着默认给 TorchGate
+        for bool_key, chain_key in (
+            ("I_noise_reduce", "I_nr_chain"),
+            ("O_noise_reduce", "O_nr_chain"),
+        ):
+            if bool_key in data and chain_key not in data:
+                self._d[chain_key] = ["TorchGate"] if data.get(bool_key) else []
+                self._sync_params(chain_key, self._d[chain_key])
+        # VST 插件列表迁移：从链中提取 VST 路径（旧数据链里直接含 VST dict）
+        for chain_key, plugins_key in (
+            ("I_nr_chain", "I_vst_plugins"),
+            ("O_nr_chain", "O_vst_plugins"),
+        ):
+            if plugins_key not in self._d or not self._d[plugins_key]:
+                self._d[plugins_key] = [
+                    el["path"] for el in (self._d.get(chain_key) or [])
+                    if isinstance(el, dict) and el.get("type") == "vst" and el.get("path")
+                ]
+                self._sync_params(plugins_key, self._d[plugins_key])
         self.save()
 
     def _load_legacy(self):
@@ -344,7 +375,6 @@ class ModelLibrary:
             "image": None,
         }
         self.data["models"].append(entry)
-        self.data["active"] = mid
         self.save()
         return entry
 
