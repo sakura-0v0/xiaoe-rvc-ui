@@ -29,8 +29,12 @@ def msgbox(text, title, flags=_MB_OK | _MB_ICONINFO):
 
 
 def check_deps():
+    # python.exe 是控制台程序，必须 CREATE_NO_WINDOW 否则每次启动闪黑框
     try:
-        return subprocess.call([PYEXE, "-c", "import " + ", ".join(DEPS)]) == 0
+        return subprocess.call(
+            [PYEXE, "-c", "import " + ", ".join(DEPS)],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        ) == 0
     except Exception:
         return False
 
