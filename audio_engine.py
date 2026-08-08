@@ -540,7 +540,9 @@ class AudioEngine:
             infer_wav *= torch.pow(
                 rms1 / rms2, 1.0 - self.gui_config.rms_mix_rate
             )
-        # SOLA algorithm from https://github.com/yxlllc/DDSP-SVC
+
+        # ==================== 修正后的 SOLA 无缝拼接 ====================
+        # 计算互相关，寻找最佳重叠偏移
         conv_input = infer_wav[
             None, None, : self.sola_buffer_frame + self.sola_search_frame
         ]
@@ -558,21 +560,45 @@ class AudioEngine:
         else:
             sola_offset = torch.argmax(cor_nom[0, 0] / cor_den[0, 0])
         printt("SOLA偏移：%d", int(sola_offset))
-        infer_wav = infer_wav[sola_offset:]
-        infer_wav[: self.sola_buffer_frame] *= self.fade_in_window
-        infer_wav[: self.sola_buffer_frame] += (
-            self.sola_buffer * self.fade_out_window
-        )
-        self.sola_buffer[:] = infer_wav[
-            self.block_frame : self.block_frame + self.sola_buffer_frame
-        ]
-        outdata[:] = (
-            infer_wav[: self.block_frame]
-            .repeat(self.gui_config.channels, 1)
-            .t()
-            .cpu()
-            .numpy()
-        )
+
+        # 1. 在偏移处执行重叠相加（不裁切波形）
+        overlap_end = sola_offset + self.sola_buffer_frame
+        if overlap_end <= infer_wav.shape[0]:
+            infer_wav[sola_offset:overlap_end] = (
+                infer_wav[sola_offset:overlap_end] * self.fade_in_window
+                + self.sola_buffer * self.fade_out_window
+            )
+        else:
+            # 边界保护（极少发生，但保留以防万一）
+            available = infer_wav.shape[0] - sola_offset
+            if available > 0:
+                infer_wav[sola_offset:] = (
+                    infer_wav[sola_offset:] * self.fade_in_window[:available]
+                    + self.sola_buffer[:available] * self.fade_out_window[:available]
+                )
+
+        # 2. 从偏移处提取输出块（若不足 block_frame 则补零）
+        out_block = infer_wav[sola_offset: sola_offset + self.block_frame]
+        if out_block.shape[0] < self.block_frame:
+            out_block = F.pad(out_block, (0, self.block_frame - out_block.shape[0]))
+
+        # 3. 更新 SOLA 缓冲区（取输出块之后的 buffer 长度，若不足则补零）
+        buf_start = sola_offset + self.block_frame
+        buf_end = buf_start + self.sola_buffer_frame
+        if buf_end <= infer_wav.shape[0]:
+            self.sola_buffer[:] = infer_wav[buf_start:buf_end]
+        else:
+            available = infer_wav.shape[0] - buf_start
+            if available > 0:
+                self.sola_buffer[:available] = infer_wav[buf_start:]
+                self.sola_buffer[available:] = 0
+            else:
+                self.sola_buffer.zero_()
+
+        # 4. 最终输出到设备
+        outdata[:] = out_block.repeat(self.gui_config.channels, 1).t().cpu().numpy()
+        # ==================== SOLA 修正结束 ====================
+
         total_time = time.perf_counter() - start_time
         if flag_vc:
             self._emit("infer_time", int(total_time * 1000))
