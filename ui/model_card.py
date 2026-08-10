@@ -129,7 +129,7 @@ class ModelCard(ClickFrame):
 
 
 class AddModelCard(ClickFrame):
-    """模型库末尾的「＋」导入块，与模型卡片同尺寸。"""
+    """模型库末尾的「＋」添加块：点击弹出「添加单个 / 批量添加」选择对话框。"""
 
     clicked = Signal()
 
@@ -138,11 +138,49 @@ class AddModelCard(ClickFrame):
         self.setObjectName("addCard")
         self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         layout = QVBoxLayout(self)
+        layout.setSpacing(2)
         plus = QLabel("＋")
         plus.setObjectName("addPlus")
         plus.setAlignment(Qt.AlignCenter)
         layout.addWidget(plus)
+        tip = QLabel("添加模型")
+        tip.setProperty("class", "tip-text")
+        tip.setAlignment(Qt.AlignCenter)
+        layout.addWidget(tip)
         self.on_left_click(lambda: self.clicked.emit())
+
+
+class AddChoiceDialog(Dialog):
+    """「＋」块的二选一弹窗：添加单个 / 批量添加。"""
+
+    def __init__(self, parent):
+        super().__init__(
+            parent,
+            win_title="添加模型",
+            width=260,
+            height=160,
+            set_fixed_size=True,
+        )
+        self.choice = None
+        self.root_layout.setSpacing(8)
+        tip = QLabel("选择添加方式：")
+        tip.setProperty("class", "section_title")
+        tip.setAlignment(Qt.AlignCenter)
+        self.root_layout.addWidget(tip)
+        for text, key in (("＋ 添加单个", "single"), ("＋＋ 批量添加", "batch")):
+            # 大按钮：默认实线边框（不用细线 light-line）
+            row = ClickFrame(default_line=True, hand_cursor=True)
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(10, 8, 10, 8)
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignCenter)
+            rl.addWidget(lbl)
+            row.on_left_click(lambda k=key: self._choose(k))
+            self.root_layout.addWidget(row)
+
+    def _choose(self, key):
+        self.choice = key
+        self.accept()
 
 
 class AdaptiveImagePicker(ImagePicker):
@@ -284,12 +322,16 @@ class ModelEditDialog(Dialog):
 
         make_line(root)
 
-        # 删除在左，↑↓ 排序在右，同一行
+        # 删除、置顶在左，↑↓ 排序在右，同一行
         sort_row = QHBoxLayout()
         delete_btn = QPushButton("🗑 删除模型")
         delete_btn.setObjectName("dangerBtn")
         delete_btn.clicked.connect(self._delete)
         sort_row.addWidget(delete_btn)
+        self.pin_btn = QPushButton()
+        self.pin_btn.clicked.connect(self._toggle_pin)
+        sort_row.addWidget(self.pin_btn)
+        self._update_pin_btn()
         sort_row.addStretch(1)
         up = QPushButton("↑ 上移")
         up.clicked.connect(lambda: self._reorder(-1))
@@ -355,6 +397,19 @@ class ModelEditDialog(Dialog):
 
     def _reorder(self, delta):
         self.library.reorder(self.mid, delta)
+        self.on_changed()
+
+    def _update_pin_btn(self):
+        self.pin_btn.setText(
+            "📌 取消置顶" if self.library.is_pinned(self.mid) else "📌 置顶"
+        )
+
+    def _toggle_pin(self):
+        if self.library.is_pinned(self.mid):
+            self.library.unpin(self.mid)
+        else:
+            self.library.pin(self.mid)
+        self._update_pin_btn()
         self.on_changed()
 
     def _delete(self):

@@ -154,6 +154,7 @@ class RvcApp(MainWin):
             self.library,
             on_activate=self._switch_model,
             on_edit=self._edit_model,
+            on_delete=self._on_library_changed,
         )
         page_model.addStretch(1)
 
@@ -387,7 +388,7 @@ class RvcApp(MainWin):
             self._notify("请先在模型库导入并选择模型")
             return
         pth = self.library.model_path(entry["id"])
-        idx = self.library.index_path(entry["id"])
+        idx = self._effective_index(entry["id"])
         if not pth or not os.path.exists(pth):
             self._notify("模型文件缺失，请重新导入")
             return
@@ -549,13 +550,17 @@ class RvcApp(MainWin):
         except Exception:
             traceback.print_exc()
 
+    def _effective_index(self, mid):
+        """模型自带 index 优先，否则用全局默认 index 兜底。"""
+        return self.library.index_path(mid) or self.rvc_cfg.get("default_index") or ""
+
     def _switch_model(self, mid):
         entry = self.library.get_entry(mid)
         if entry is None or not entry.get("model"):
             return
         self.library.set_active(mid)
         pth = self.library.model_path(mid)
-        idx = self.library.index_path(mid)
+        idx = self._effective_index(mid)
         self.rvc_cfg.set("pth_path", pth)
         self.rvc_cfg.set("index_path", idx or "")
         self.model_page.refresh()

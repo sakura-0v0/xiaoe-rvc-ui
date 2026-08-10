@@ -44,6 +44,7 @@ RVC_CONFIG_DEFAULTS = {
     "formant": 0.0,
     "index_rate": 0,
     "rms_mix_rate": 0,
+    "default_index": "",  # 全局兜底 index：模型无自带 index 时使用
     "block_time": 0.25,
     "crossfade_length": 0.05,
     "extra_time": 2.5,
@@ -283,7 +284,9 @@ class ModelLibrary:
     def __init__(self, models_dir, library_path):
         self.models_dir = models_dir
         self.library_path = library_path
-        self.data = {"active": None, "models": []}
+        # 两个 JSON 数组：pinned=置顶组（UI 上网格），models=非置顶组（下网格），
+        # 条目按所在数组归属组，排序互不影响（物理隔离）。
+        self.data = {"active": None, "pinned": [], "models": []}
         self._image_bridges = {}
         self.load()
 
@@ -296,17 +299,28 @@ class ModelLibrary:
     # ---- 持久化 ----
     def load(self):
         os.makedirs(self.models_dir, exist_ok=True)
+        data = {"active": None, "pinned": [], "models": []}
         if os.path.exists(self.library_path):
             try:
                 with open(self.library_path, "r", encoding="utf8") as f:
-                    self.data = json.load(f)
+                    data = json.load(f)
             except Exception:
-                self.data = {"active": None, "models": []}
-        if not isinstance(self.data.get("models"), list):
-            self.data["models"] = []
+                data = {"active": None, "pinned": [], "models": []}
+        if not isinstance(data.get("models"), list):
+            data["models"] = []
+        if not isinstance(data.get("pinned"), list):
+            data["pinned"] = []
+        # 旧单数组结构（条目带 pinned 字段）→ 分流到两个数组
+        if any(m.get("pinned") for m in data["models"]):
+            data["pinned"] = (
+                [m for m in data["models"] if m.get("pinned")] + data["pinned"]
+            )
+            data["models"] = [m for m in data["models"] if not m.get("pinned")]
         # 兼容旧数据：name_auto 缺失时，只有默认名字「新模型」视为自动
-        for m in self.data["models"]:
+        for m in data["pinned"] + data["models"]:
+            m.pop("pinned", None)
             m.setdefault("name_auto", m.get("name") == "新模型")
+        self.data = data
         self.save()
 
     def save(self):
@@ -316,7 +330,17 @@ class ModelLibrary:
 
     # ---- 查询 ----
     def entries(self):
+        """全部模型：置顶组在前、非置顶组在后（组合视图）。"""
+        return self.data.get("pinned", []) + self.data.get("models", [])
+
+    def pinned_entries(self):
+        return self.data.get("pinned", [])
+
+    def unpinned_entries(self):
         return self.data.get("models", [])
+
+    def is_pinned(self, mid):
+        return any(m["id"] == mid for m in self.data.get("pinned", []))
 
     def get_entry(self, mid):
         for m in self.entries():
@@ -388,7 +412,7 @@ class ModelLibrary:
             ext = os.path.splitext(image_path)[1].lower() or ".png"
             shutil.copy2(image_path, os.path.join(mdir, "cover" + ext))
             entry["image"] = "cover" + ext
-        self.data["models"].append(entry)
+        self.data["models"].append(entry)  # 新模型默认非置顶
         self.data["active"] = mid
         self.save()
         return entry
@@ -406,7 +430,7 @@ class ModelLibrary:
             "index": None,
             "image": None,
         }
-        self.data["models"].append(entry)
+        self.data["models"].append(entry)  # 新建默认非置顶
         self.save()
         return entry
 
@@ -477,21 +501,49 @@ class ModelLibrary:
         self.save()
 
     def remove(self, mid):
-        self.data["models"] = [m for m in self.entries() if m["id"] != mid]
+        for arr in (self.data["pinned"], self.data["models"]):
+            arr[:] = [m for m in arr if m["id"] != mid]
         if self.data.get("active") == mid:
-            self.data["active"] = self.entries()[0]["id"] if self.entries() else None
+            all_entries = self.entries()
+            self.data["active"] = all_entries[0]["id"] if all_entries else None
         shutil.rmtree(os.path.join(self.models_dir, mid), ignore_errors=True)
         self.save()
 
     def reorder(self, mid, delta):
-        models = self.entries()
-        idx = next((i for i, m in enumerate(models) if m["id"] == mid), None)
-        if idx is None:
+        """在所属组内单步排序（置顶/非置顶物理隔离，不会跨组）。"""
+        for arr in (self.data["pinned"], self.data["models"]):
+            idx = next((i for i, m in enumerate(arr) if m["id"] == mid), None)
+            if idx is None:
+                continue
+            new = idx + delta
+            if 0 <= new < len(arr):
+                arr[idx], arr[new] = arr[new], arr[idx]
+                self.save()
             return
-        new = idx + delta
-        if not (0 <= new < len(models)):
+
+    def pin(self, mid):
+        """置顶：从非置顶组移到置顶组末尾（保持组内原顺序）。"""
+        e = self.get_entry(mid)
+        if e is None or e in self.data["pinned"]:
             return
-        models[idx], models[new] = models[new], models[idx]
+        self.data["models"].remove(e)
+        self.data["pinned"].append(e)
+        self.save()
+
+    def unpin(self, mid):
+        """取消置顶：从置顶组移到非置顶组末尾。"""
+        e = self.get_entry(mid)
+        if e is None or e not in self.data["pinned"]:
+            return
+        self.data["pinned"].remove(e)
+        self.data["models"].append(e)
+        self.save()
+
+    def set_order(self, mids, pinned):
+        """按给定 mid 顺序重排指定组（置顶/非置顶），另一组顺序不动。"""
+        by_id = {m["id"]: m for m in self.entries()}
+        ordered = [by_id[mid] for mid in mids if mid in by_id]
+        self.data["pinned" if pinned else "models"] = ordered
         self.save()
 
 
