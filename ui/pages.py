@@ -1,6 +1,8 @@
 import os
 import threading
 
+import error_report
+
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QCursor, QPixmap
 from PySide6.QtWidgets import (
@@ -163,6 +165,9 @@ class _GridWidget(QWidget):
     # 布局
     # ------------------------------------------------------------------
     def set_cards(self, cards):
+        # 重建卡片会让右侧滚动区重新布局并复位滚动条，先记下原位置，布局完成后再恢复
+        sb = self._scrollbar()
+        scroll_pos = sb.value() if sb is not None else 0
         for c in self._cards:
             if hasattr(c, "cleanup"):
                 c.cleanup()
@@ -174,6 +179,8 @@ class _GridWidget(QWidget):
         self._corner_mid = None
         self._hide_corners()
         self._relayout()
+        if sb is not None:
+            QTimer.singleShot(0, lambda sb=sb, pos=scroll_pos: sb.setValue(pos))
 
     def _cols(self):
         w = self.width()
@@ -214,6 +221,15 @@ class _GridWidget(QWidget):
             if isinstance(w, QAbstractScrollArea):
                 vp = w.viewport()
                 return QRect(vp.mapTo(win, QPoint(0, 0)), vp.size())
+            w = w.parentWidget()
+        return None
+
+    def _scrollbar(self):
+        """所在右侧滚动区的垂直滚动条（无则 None）。"""
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QAbstractScrollArea):
+                return w.verticalScrollBar()
             w = w.parentWidget()
         return None
 
@@ -515,7 +531,13 @@ class _BatchImportWorker(QObject):
             if not os.path.isfile(idx):
                 idx = None
             self.status.emit(f"正在导入 {i}/{total}：{name}")
-            self.library.import_model(os.path.join(f, p), idx, name=name)
+            try:
+                self.library.import_model(os.path.join(f, p), idx, name=name)
+            except Exception as e:
+                error_report.log_error(
+                    "batch_import", f"批量导入失败：{name}", e
+                )
+                break  # 文件已损坏等情况：记日志并中止，进度窗照常关闭
             imported += 1
         self.finished.emit(imported)
 
@@ -601,7 +623,7 @@ class ModelPage:
 
     def _on_reorder(self, mids, pinned):
         self.library.set_order(mids, pinned)
-        self.refresh()
+        # 网格已在拖拽中就地重排（_reorder_cards），不再 refresh 重建，避免滚动区复位
 
     def _on_pin(self, mid):
         e = self.library.get_entry(mid)
@@ -811,7 +833,7 @@ def build_chain_page(container, config, side):
 # ---------------------------------------------------------------------------
 # 通用设置页
 # ---------------------------------------------------------------------------
-def build_settings_page(container, config):
+def build_settings_page(container, config, on_open_error_log=None):
     # 用 run.vbs 作为启动目标（隐藏 cmd 窗口，快捷方式/自启不闪黑框）
     run_launcher = os.path.join(XIAOE_DIR, "run.vbs")
     icon = os.path.join(XIAOE_DIR, "static", "logo.ico")
@@ -855,11 +877,16 @@ def build_settings_page(container, config):
     BottomItem("创建快捷方式", text="在桌面创建启动快捷方式",
                btn_text="创建", callback=_create_desktop_lnk,
                parent_layout=container)
+    BottomItem("错误日志", text="打开错误记录窗口",
+               btn_text="打开", callback=on_open_error_log,
+               parent_layout=container)
 
     make_line(container, bold=True)
 
     CheckItem("通知显示", text="启动/停止变声时弹出提示",
               config=config, config_name="notify_show", parent_layout=container)
+    CheckItem("自动弹错误", text="发生错误时自动弹出错误日志窗口",
+              config=config, config_name="auto_error_popup", parent_layout=container)
     CheckItem("启动隐藏", text="启动后隐藏到系统托盘",
               config=config, config_name="start_hidden", parent_layout=container)
     CheckItem("自动变声", text="软件启动后自动开始变声",

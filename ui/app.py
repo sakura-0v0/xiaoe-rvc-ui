@@ -25,9 +25,11 @@ from xiaoe_ui import (
 )
 
 import info
+import error_report
 from ui.config import LIBRARY_PATH, MODELS_DIR, RVC_ROOT, ModelLibrary
 from vst_engine import editor_manager, vst_config
 from ui.model_card import ModelEditDialog
+from ui.error_window import ErrorLogWindow
 from ui.pages import (
     AudioPage,
     BottomBar,
@@ -84,6 +86,7 @@ class RvcApp(MainWin):
         self.apply_all()
         self._wire()
         self._setup_tray()
+        error_report.set_error_handler(self._on_error_recorded)
         # 初始显示由框架 show_default 参数驱动（启动隐藏时 False 则隐藏到托盘）
         if self.show_default:
             self.show()
@@ -180,7 +183,9 @@ class RvcApp(MainWin):
 
         # 通用设置
         page_settings = left.add_page("settings", "通用设置", icon="⚙")
-        build_settings_page(page_settings, self.rvc_cfg)
+        build_settings_page(
+            page_settings, self.rvc_cfg, on_open_error_log=self._open_error_window
+        )
         page_settings.addStretch(1)
 
         # 主题（ThemePage 内部自己会在末尾 addStretch）
@@ -313,9 +318,6 @@ class RvcApp(MainWin):
             run_in_main(lambda: self.bottom_bar.sr_label.setText(f"采样率:{value}"))
         elif name == "running":
             run_in_main(lambda: self._set_running(value))
-        elif name == "vst_error":
-            side, path, msg = value
-            run_in_main(lambda: self._notify(f"VST 插件加载失败（{path}）：{msg}"))
 
     def _set_running(self, running):
         self._running = running
@@ -419,8 +421,9 @@ class RvcApp(MainWin):
             try:
                 work()
             except Exception:
-                traceback.print_exc()
-                run_in_main(lambda: self._notify("操作失败，请查看控制台日志"))
+                error_report.log_error(
+                    "threaded_reload", "加载/启动变声失败", sys.exc_info()
+                )
             else:
                 if success_msg:
                     run_in_main(lambda: self._notify(success_msg))
@@ -458,8 +461,55 @@ class RvcApp(MainWin):
         if self.rvc_cfg.get("notify_show"):
             self.notify.show(text)
 
+    # ------------------------------------------------------------------
+    # 错误日志窗口
+    # ------------------------------------------------------------------
+    def _on_error_recorded(self, context, message):
+        """error_report 每次写日志后触发 → 回主线程按开关自动打开错误窗。"""
+        run_in_main(self._auto_show_error_win)
+
+    def _auto_show_error_win(self):
+        """报错后自动打开错误窗；任何异常都吞掉，绝不能回环到 excepthook。"""
+        try:
+            if not self.rvc_cfg.get("auto_error_popup"):
+                return
+            if QApplication.instance() is None:
+                return
+            win = self._ensure_error_win()
+            if win is None:
+                return
+            win.refresh()
+            if win.isHidden():
+                win.show()  # WA_ShowWithoutActivating 显示但不抢焦点
+        except Exception:
+            pass
+
+    def _open_error_window(self):
+        """设置页「错误日志」按钮：手动打开并激活窗口。"""
+        try:
+            if QApplication.instance() is None:
+                return
+            win = self._ensure_error_win()
+            if win is None:
+                return
+            win.refresh()
+            win.show()
+            win.raise_()
+            win.activateWindow()
+        except Exception:
+            pass
+
+    def _ensure_error_win(self):
+        win = ErrorLogWindow.get_singleton("error_log")
+        if win is None:
+            try:
+                win = ErrorLogWindow()
+            except Exception:
+                return None  # 构造失败不再重试，避免异常回环
+        return win
+
     def _on_vst_editor_error(self, side, path, msg):
-        run_in_main(lambda: self._notify(msg))
+        error_report.log_error("vst_editor", msg)
 
     def _on_vst_param(self, side, path, name, value):
         """编辑器子进程的参数变化：实时应用到音频链实例 + 写入配置（即持久化）。"""

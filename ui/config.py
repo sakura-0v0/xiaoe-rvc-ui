@@ -61,6 +61,7 @@ RVC_CONFIG_DEFAULTS = {
     "vc": True,
     # 通用设置
     "notify_show": True,   # 通知显示
+    "auto_error_popup": True,  # 报错时自动弹出错误日志窗口
     "start_hidden": False,  # 启动隐藏
     "auto_vc": False,      # 自动变声
 }

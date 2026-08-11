@@ -14,6 +14,13 @@ os.environ["OMP_NUM_THREADS"] = "4"
 
 
 def main():
+    # 全局异常兜底：主线程/后台线程未捕获异常统一写进 error.log
+    from error_report import install_global_hooks, log_error
+    install_global_hooks()
+    # 启动标记：区分「本次启动」与「运行中报错」（只写日志，不弹错误窗）
+    from info import APP_VERSION, detect_rvc_version
+    log_error("启动", f"软件启动 v{APP_VERSION}（{detect_rvc_version()}）", notify=False)
+
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 

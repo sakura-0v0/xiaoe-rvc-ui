@@ -21,6 +21,8 @@ import torch
 
 from ui.config import CONFIG_FILES_DIR
 
+import error_report
+
 VST_STATES_PATH = os.path.join(CONFIG_FILES_DIR, "vst_states.json")
 
 
@@ -42,7 +44,10 @@ class VstConfig:
                 d = json.load(f)
             if isinstance(d.get("plugins"), dict):
                 self.data = d
-        except Exception:
+        except Exception as e:
+            error_report.log_error(
+                "vst_config.load", f"VST 状态文件读取失败：{self.path}", e
+            )
             self.data = {"plugins": {}}
 
     def save(self):
@@ -161,23 +166,32 @@ class VSTEngine:
         self.plugin = pb.load_plugin(dll)
         try:
             self.name = self.plugin.name or self.name
-        except Exception:
-            pass
+        except Exception as e:
+            error_report.log_error(
+                "vst_engine.load", f"{path} 读取插件名失败", e
+            )
         try:
             self.latency = int(self.plugin.reported_latency_samples or 0)
-        except Exception:
+        except Exception as e:
+            error_report.log_error(
+                "vst_engine.load", f"{path} 读取延迟失败", e
+            )
             self.latency = 0
         # 恢复已保存参数（参数级，raw_state 对部分插件不含实时参数，不用）
         for name, value in vst_config.get_params(path).items():
             try:
                 setattr(self.plugin, name, value)
-            except Exception:
-                pass
+            except Exception as e:
+                error_report.log_error(
+                    "vst_engine.load", f"{path} 参数 {name} 恢复失败", e
+                )
         if not vst_config.get_name(path):
             try:
                 vst_config.set_name(path, self.name)
-            except Exception:
-                pass
+            except Exception as e:
+                error_report.log_error(
+                    "vst_engine.load", f"{path} 保存插件名失败", e
+                )
 
     def __call__(self, x):
         n = x.shape[0]
@@ -239,14 +253,16 @@ class VstEditorManager:
             try:
                 with open(state_file, "w", encoding="utf8") as f:
                     json.dump(params, f)
-            except OSError:
-                pass
+            except OSError as e:
+                error_report.log_error(
+                    "vst_editor", f"编辑器状态文件写入失败：{state_file}", e
+                )
         worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vst_editor_worker.py")
         try:
             proc = subprocess.Popen(
                 [sys.executable, "-I", worker, resolve_vst_dll(path), state_file],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,  # 捕获子进程 traceback，异常退出时记录真实原因
             )
         except Exception as e:
             try:
@@ -309,7 +325,19 @@ class VstEditorManager:
             if cur is proc:
                 del self._procs[(side, path)]
         if proc.returncode != 0:
-            self.on_error(side, path, "插件界面进程异常退出")
+            # 读取子进程 stderr（worker 崩溃时的 traceback），给出真实退出原因
+            stderr_text = ""
+            try:
+                stderr_text = (
+                    proc.stderr.read().decode("utf8", "replace").strip()
+                    if proc.stderr else ""
+                )
+            except Exception:
+                pass
+            msg = f"插件界面进程异常退出（{path}）"
+            if stderr_text:
+                msg += f"：{stderr_text[-2000:]}"
+            self.on_error(side, path, msg)
 
     def close_editor(self, side, path):
         with self._lock:

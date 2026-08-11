@@ -17,6 +17,10 @@ from tools.cuda_graph import cuda_graph_enabled, run_cuda_graph
 
 from nr_engines import NRChain
 
+from xiaoe_ui import run_in_main
+
+import error_report
+
 flag_vc = False
 
 
@@ -282,10 +286,14 @@ class AudioEngine:
         global flag_vc
         if flag_vc:
             flag_vc = False
-            if self.stream is not None:
+        # 异常路径（audio_callback）也可能调用：只要还有流就真正停掉并通知 UI
+        if self.stream is not None:
+            try:
                 self.stream.abort()
                 self.stream.close()
-                self.stream = None
+            except Exception:
+                pass
+            self.stream = None
             self._emit("running", False)
         # 不在停止时销毁降噪链：重启/停流期间的 in-flight 回调仍可能访问，
         # 销毁放到下次 _build_nr_chains 重建时统一处理
@@ -307,7 +315,7 @@ class AudioEngine:
         )
 
     def _build_vst(self, el, out_mode):
-        """构建 VST 引擎；失败通知并返回 None（该元素直通跳过，链其余继续）。"""
+        """构建 VST 引擎；失败记录错误并返回 None（该元素直通跳过，链其余继续）。"""
         path = el.get("path", "") if isinstance(el, dict) else ""
         if not path:
             return None
@@ -317,9 +325,7 @@ class AudioEngine:
                 lambda: VSTEngine(path, self.gui_config.samplerate, self.config.device)
             )
         except Exception as e:
-            print(f"[vst_error] load failed: {path} -> {e}", file=sys.stderr)
-            traceback.print_exc()
-            self._emit("vst_error", ("O" if out_mode else "I", path, str(e)))
+            error_report.log_error("vst_load", f"VST 插件加载失败：{path}", e)
             return None
 
     def _build_nr_chains(self):
@@ -423,7 +429,20 @@ class AudioEngine:
     # ------------------------------------------------------------------
     # 实时音频处理（逐字搬移）
     # ------------------------------------------------------------------
-    def audio_callback(
+    def audio_callback(self, indata, outdata, frames, times, status):
+        """音频处理：异常时记录日志、停止变声并让 PortAudio 中止流。"""
+        try:
+            self._audio_callback_inner(indata, outdata, frames, times, status)
+        except Exception as e:
+            global flag_vc
+            flag_vc = False
+            error_report.log_error(
+                "audio_callback", "音频处理线程异常，已停止变声", e
+            )
+            run_in_main(lambda: self.stop_stream())
+            raise  # 让 PortAudio 中止流，回调不再被调用
+
+    def _audio_callback_inner(
         self, indata, outdata, frames, times, status
     ):
         """
